@@ -1,9 +1,9 @@
 """
 APTA — AI Analysis Layer v2
 Supports multiple AI providers:
-- Anthropic Claude (ANTHROPIC_API_KEY)
-- Google Gemini  (GEMINI_API_KEY)
-- Groq           (GROQ_API_KEY)
+- Google Gemini  (GEMINI_API_KEY)  -- FREE at aistudio.google.com
+- Groq           (GROQ_API_KEY)    -- FREE at console.groq.com
+- Anthropic Claude (ANTHROPIC_API_KEY) -- paid
 Auto-detects which key is available and uses it.
 """
 
@@ -34,15 +34,18 @@ Return ONLY the JSON, no markdown, no preamble."""
 def analyze_with_ai(correlation, nmap, nikto, whatweb):
     """
     Auto-detects available AI provider and uses it.
-    Priority: Gemini → Groq → Claude → Fallback
+    Priority: Gemini -> Groq -> Claude -> Fallback
     """
-    scan_data = _build_scan_data(correlation, nmap, nikto, whatweb)
-    user_prompt = f"Analyze this penetration testing data for target: {scan_data['target']}\n\nDATA:\n{json.dumps(scan_data, indent=2)}\n\nGenerate a professional security assessment based ONLY on the data above."
+    scan_data   = _build_scan_data(correlation, nmap, nikto, whatweb)
+    user_prompt = (
+        f"Analyze this penetration testing data for target: {scan_data['target']}\n\n"
+        f"DATA:\n{json.dumps(scan_data, indent=2)}\n\n"
+        f"Generate a professional security assessment based ONLY on the data above."
+    )
 
-    # Try each provider in order
-    gemini_key = os.getenv("GEMINI_API_KEY", "")
-    groq_key   = os.getenv("GROQ_API_KEY", "")
-    claude_key = os.getenv("ANTHROPIC_API_KEY", "")
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip()
+    groq_key   = os.getenv("GROQ_API_KEY",   "").strip()
+    claude_key = os.getenv("ANTHROPIC_API_KEY", "").strip()
 
     if gemini_key:
         console.print("[cyan][*] Using Google Gemini for AI analysis...[/cyan]")
@@ -50,7 +53,7 @@ def analyze_with_ai(correlation, nmap, nikto, whatweb):
         if result: return result
 
     if groq_key:
-        console.print("[cyan][*] Using Groq for AI analysis...[/cyan]")
+        console.print("[cyan][*] Using Groq (Llama3) for AI analysis...[/cyan]")
         result = _use_groq(groq_key, user_prompt)
         if result: return result
 
@@ -64,16 +67,15 @@ def analyze_with_ai(correlation, nmap, nikto, whatweb):
     return _fallback(correlation)
 
 
-# ─── GEMINI ──────────────────────────────────────────────────
+# ─── GEMINI ──────────────────────────────────────────────────────────────────
 def _use_gemini(api_key, prompt):
     try:
-        import google.generativeai as genai
-        genai.configure(api_key=api_key)
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=SYSTEM_PROMPT
+        from google import genai
+        client = genai.Client(api_key=api_key)
+        response = client.models.generate_content(
+            model="gemini-2.0-flash",
+            contents=SYSTEM_PROMPT + "\n\n" + prompt
         )
-        response = model.generate_content(prompt)
         console.print("[green][+] Gemini analysis complete[/green]")
         return _parse(response.text)
     except Exception as e:
@@ -81,7 +83,7 @@ def _use_gemini(api_key, prompt):
         return None
 
 
-# ─── GROQ ────────────────────────────────────────────────────
+# ─── GROQ ─────────────────────────────────────────────────────────────────────
 def _use_groq(api_key, prompt):
     try:
         from groq import Groq
@@ -102,7 +104,7 @@ def _use_groq(api_key, prompt):
         return None
 
 
-# ─── CLAUDE ──────────────────────────────────────────────────
+# ─── CLAUDE ───────────────────────────────────────────────────────────────────
 def _use_claude(api_key, prompt):
     try:
         import anthropic
@@ -121,19 +123,25 @@ def _use_claude(api_key, prompt):
         return None
 
 
-# ─── HELPERS ─────────────────────────────────────────────────
+# ─── HELPERS ──────────────────────────────────────────────────────────────────
 def _build_scan_data(correlation, nmap, nikto, whatweb):
     return {
-        "target": correlation.get("target"),
+        "target":       correlation.get("target"),
         "overall_risk": correlation.get("risk_level"),
-        "score": correlation.get("attack_surface_score"),
+        "score":        correlation.get("attack_surface_score"),
         "open_ports": [
             {
-                "port": p["port"], "service": p["service"],
-                "product": p.get("product",""), "version": p.get("version",""),
+                "port":    p["port"],
+                "service": p["service"],
+                "product": p.get("product", ""),
+                "version": p.get("version", ""),
                 "top_cves": [
-                    {"id": c["cve_id"], "severity": c["severity"],
-                     "score": c.get("cvss_score"), "summary": c["description"][:150]}
+                    {
+                        "id":       c["cve_id"],
+                        "severity": c["severity"],
+                        "score":    c.get("cvss_score"),
+                        "summary":  c["description"][:150]
+                    }
                     for c in p.get("cves", [])[:3]
                 ]
             }
@@ -143,8 +151,8 @@ def _build_scan_data(correlation, nmap, nikto, whatweb):
             {"name": t["name"], "version": t.get("version")}
             for t in correlation.get("detected_technologies", [])
         ],
-        "rules_triggered":   correlation.get("triggered_rules", []),
-        "compound_risks":    correlation.get("compound_risks", []),
+        "rules_triggered": correlation.get("triggered_rules", []),
+        "compound_risks":  correlation.get("compound_risks",  []),
         "web_findings": [
             {"severity": v["severity"], "msg": v["msg"][:200]}
             for v in (nikto.get("vulnerabilities", []) if nikto else [])
@@ -158,16 +166,19 @@ def _build_scan_data(correlation, nmap, nikto, whatweb):
 
 
 def _parse(raw):
+    if not raw:
+        return None
     cleaned = raw.strip()
+    # Strip markdown code fences if present
     if cleaned.startswith("```"):
-        lines = cleaned.split("\n")
-        cleaned = "\n".join(lines[1:-1] if lines[-1] == "```" else lines[1:])
+        lines   = cleaned.split("\n")
+        cleaned = "\n".join(lines[1:-1] if lines[-1].strip() == "```" else lines[1:])
     try:
         analysis = json.loads(cleaned)
         analysis["ai_powered"] = True
         return analysis
-    except:
-        console.print("[yellow][!] Could not parse AI response as JSON[/yellow]")
+    except json.JSONDecodeError:
+        console.print("[yellow][!] Could not parse AI response as JSON — using fallback[/yellow]")
         return None
 
 
@@ -177,22 +188,34 @@ def _fallback(correlation):
     cves  = len(correlation.get("cve_summary", []))
     return {
         "ai_powered": False,
-        "executive_summary": f"Target presents {risk} risk with {ports} open services and {cves} CVEs identified.",
+        "executive_summary": (
+            f"Target presents {risk} risk with {ports} open services "
+            f"and {cves} CVEs identified. Manual review recommended."
+        ),
         "risk_narrative": (
             f"APTA identified {ports} open port(s). "
-            f"{len(correlation.get('triggered_rules',[]))} security rules triggered. "
-            f"{len(correlation.get('compound_risks',[]))} compound risks detected. "
-            f"{cves} CVEs found. Add an AI API key to .env for full analysis."
+            f"{len(correlation.get('triggered_rules', []))} security rules triggered. "
+            f"{len(correlation.get('compound_risks',  []))} compound risks detected. "
+            f"{cves} CVEs found. "
+            f"Add GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY to .env for full AI analysis."
         ),
         "key_findings": [
-            {"title": r["risk"], "severity": r["severity"],
-             "explanation": r["description"], "evidence": "APTA correlation engine"}
+            {
+                "title":       r["risk"],
+                "severity":    r["severity"],
+                "explanation": r["description"],
+                "evidence":    "APTA correlation engine"
+            }
             for r in correlation.get("triggered_rules", [])
         ],
         "attack_paths": correlation.get("recommended_next_steps", []),
         "remediation_priorities": [
-            {"priority": i+1, "action": s, "rationale": "APTA correlation engine"}
+            {"priority": i + 1, "action": s, "rationale": "APTA correlation engine"}
             for i, s in enumerate(correlation.get("recommended_next_steps", [])[:5])
         ],
-        "analyst_notes": "Add GEMINI_API_KEY, GROQ_API_KEY or ANTHROPIC_API_KEY to .env for AI analysis."
+        "analyst_notes": (
+            "AI analysis unavailable. "
+            "Add GEMINI_API_KEY (free at aistudio.google.com) or "
+            "GROQ_API_KEY (free at console.groq.com) to .env."
+        )
     }
